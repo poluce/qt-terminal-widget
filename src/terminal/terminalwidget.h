@@ -24,6 +24,7 @@ protected:
     void mousePressEvent(QMouseEvent *e) override;
     void mouseReleaseEvent(QMouseEvent *e) override;
     void inputMethodEvent(QInputMethodEvent *e) override;
+    void contextMenuEvent(QContextMenuEvent *e) override;
 
 private slots:
     void onPtyReadyRead();

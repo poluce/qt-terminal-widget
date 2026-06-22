@@ -944,13 +944,38 @@ void TerminalWidget::syncCursor()
 void TerminalWidget::mousePressEvent(QMouseEvent *e)
 {
     QPlainTextEdit::mousePressEvent(e);
-    syncCursor();
 }
 
 void TerminalWidget::mouseReleaseEvent(QMouseEvent *e)
 {
     QPlainTextEdit::mouseReleaseEvent(e);
-    syncCursor();
+    
+    // 🌟 只有在用户没有选中任何文本时（纯单击），才将光标同步回提示符
+    // 如果有选中，则跳过同步以保留高亮选区供用户复制
+    if (!textCursor().hasSelection()) {
+        syncCursor();
+    }
+}
+
+void TerminalWidget::contextMenuEvent(QContextMenuEvent *e)
+{
+    // 🌟 智能右键复制/粘贴模式
+    if (textCursor().hasSelection()) {
+        // 如果有选区，右击直接执行复制，并清除选区
+        copy();
+        
+        QTextCursor cursor = textCursor();
+        cursor.clearSelection();
+        setTextCursor(cursor);
+        syncCursor();
+    } else {
+        // 如果无选区，右击直接将剪贴板内容写入 PTY (粘贴)
+        QClipboard *clipboard = QGuiApplication::clipboard();
+        if (clipboard) {
+            insertFromMimeData(clipboard->mimeData());
+        }
+    }
+    e->accept(); // 接受事件，阻止默认右键菜单弹出
 }
 
 int TerminalWidget::charDisplayWidth(QChar ch) const
