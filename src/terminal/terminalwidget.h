@@ -20,6 +20,7 @@ public:
 protected:
     void keyPressEvent(QKeyEvent *e) override;
     void resizeEvent(QResizeEvent *e) override;
+    void wheelEvent(QWheelEvent *e) override;
     void insertFromMimeData(const QMimeData *source) override;
     void mousePressEvent(QMouseEvent *e) override;
     void mouseReleaseEvent(QMouseEvent *e) override;
@@ -38,6 +39,7 @@ private:
     void writeTextSegmentInternal(const QString &textToInsert, const QTextCharFormat &format);
     void writeSingleCharString(const QString &textToInsert, int logicalW, const QTextCharFormat &format);
     void syncCursor();
+    void checkHeuristicAlternateScreen();
     int charDisplayWidth(QChar ch) const;
     int stringDisplayWidth(const QString &str) const;
     int columnToCharIndex(const QString &text, int targetCol) const;
@@ -66,6 +68,17 @@ private:
 
     // 屏幕视口在文档缓冲区中的起始行号（0-indexed）
     int m_screenBufferStartRow;
+
+    // 备用屏幕缓冲区支持 (Alternate Screen Buffer)
+    QTextDocument *m_primaryDoc;
+    QTextDocument *m_alternateDoc;
+    bool m_isAlternateBuffer;
+    bool m_win32InputModeActive;
+    bool m_isHeuristicAlternateBuffer;
+    bool m_mouseTrackingEnabled;
+    int m_mouseProtocol;
+    bool m_followTerminalOutput;
+    bool m_syncingScrollBar;
 };
 
 #endif // TERMINALWIDGET_H

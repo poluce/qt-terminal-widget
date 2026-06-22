@@ -12,6 +12,7 @@ set(CMAKE_AUTOUIC ON)
 
 # 寻找 Qt 依赖
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+include(CTest)
 
 # 定义 Widget 库目标
 add_library(qtterminalwidget
@@ -65,6 +66,19 @@ target_link_libraries(qtterminalwidget
         Qt6::Core
         Qt6::Gui
 )
+
+if(BUILD_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    add_executable(terminalwidget_wheel_test
+        tests/terminalwidget_wheel_test.cpp
+    )
+    target_link_libraries(terminalwidget_wheel_test PRIVATE
+        qtterminalwidget
+        Qt6::Test
+    )
+    add_test(NAME terminalwidget_wheel_test COMMAND terminalwidget_wheel_test)
+endif()
 
 # 独立编译 Demo 测试程序
 option(BUILD_EXAMPLES "Build example applications" ON)

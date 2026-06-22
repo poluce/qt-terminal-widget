@@ -372,19 +372,51 @@ void AnsiParser::parseEscapeSequence(const QByteArray &seq, char cmd, QList<Ansi
         tokens.append(token);
         break;
     }
-    case 'l': { // RM (Reset Mode) - e.g. ?25l Hide Cursor
-        if (!params.isEmpty() && params.first() == "?25") {
-            AnsiToken token;
-            token.type = AnsiToken::HideCursor;
-            tokens.append(token);
+    case 'l': { // RM (Reset Mode) - e.g. ?25l Hide Cursor, ?1049l Exit Alternate Buffer
+        if (!params.isEmpty()) {
+            QString firstParam = params.first();
+            if (firstParam == "?25") {
+                AnsiToken token;
+                token.type = AnsiToken::HideCursor;
+                tokens.append(token);
+            } else if (firstParam == "?1049" || firstParam == "?47" || firstParam == "?1047") {
+                AnsiToken token;
+                token.type = AnsiToken::ExitAlternateBuffer;
+                tokens.append(token);
+            } else if (firstParam == "?9001") {
+                AnsiToken token;
+                token.type = AnsiToken::Win32InputModeReset;
+                tokens.append(token);
+            } else if (firstParam == "?1000" || firstParam == "?1002" || firstParam == "?1003" || firstParam == "?1005" || firstParam == "?1006") {
+                AnsiToken token;
+                token.type = AnsiToken::MouseTrackingReset;
+                token.val1 = firstParam.mid(1).toInt();
+                tokens.append(token);
+            }
         }
         break;
     }
-    case 'h': { // SM (Set Mode) - e.g. ?25h Show Cursor
-        if (!params.isEmpty() && params.first() == "?25") {
-            AnsiToken token;
-            token.type = AnsiToken::ShowCursor;
-            tokens.append(token);
+    case 'h': { // SM (Set Mode) - e.g. ?25h Show Cursor, ?1049h Enter Alternate Buffer
+        if (!params.isEmpty()) {
+            QString firstParam = params.first();
+            if (firstParam == "?25") {
+                AnsiToken token;
+                token.type = AnsiToken::ShowCursor;
+                tokens.append(token);
+            } else if (firstParam == "?1049" || firstParam == "?47" || firstParam == "?1047") {
+                AnsiToken token;
+                token.type = AnsiToken::EnterAlternateBuffer;
+                tokens.append(token);
+            } else if (firstParam == "?9001") {
+                AnsiToken token;
+                token.type = AnsiToken::Win32InputModeSet;
+                tokens.append(token);
+            } else if (firstParam == "?1000" || firstParam == "?1002" || firstParam == "?1003" || firstParam == "?1005" || firstParam == "?1006") {
+                AnsiToken token;
+                token.type = AnsiToken::MouseTrackingSet;
+                token.val1 = firstParam.mid(1).toInt();
+                tokens.append(token);
+            }
         }
         break;
     }
@@ -403,6 +435,16 @@ void AnsiParser::parseEscapeSequence(const QByteArray &seq, char cmd, QList<Ansi
         token.type = AnsiToken::CursorPosition;
         token.cursorRow = row;
         token.cursorCol = col;
+        tokens.append(token);
+        break;
+    }
+    case 'c': { // DA (Device Attributes)
+        AnsiToken token;
+        if (seqStr.startsWith(">")) {
+            token.type = AnsiToken::SecondaryDeviceAttributesQuery;
+        } else {
+            token.type = AnsiToken::DeviceAttributesQuery;
+        }
         tokens.append(token);
         break;
     }

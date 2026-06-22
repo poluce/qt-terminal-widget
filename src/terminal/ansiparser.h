@@ -36,7 +36,15 @@ struct AnsiToken
         InsertLine,               // IL (L) - val1 包含个数
         DeleteLine,                // DL (M) - val1 包含个数
         HideCursor,
-        ShowCursor
+        ShowCursor,
+        EnterAlternateBuffer,
+        ExitAlternateBuffer,
+        Win32InputModeSet,
+        Win32InputModeReset,
+        MouseTrackingSet,
+        MouseTrackingReset,
+        DeviceAttributesQuery,
+        SecondaryDeviceAttributesQuery
     };
     Type type;
     QString text;

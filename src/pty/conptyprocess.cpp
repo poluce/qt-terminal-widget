@@ -155,8 +155,8 @@ bool ConPtyProcess::startProcess(const QString &shellPath, QStringList environme
                 NULL,                           // Process handle not inheritable
                 NULL,                           // Thread handle not inheritable
                 FALSE,                          // Inherit handles (FALSE prevents handle conflict in ConPTY)
-                EXTENDED_STARTUPINFO_PRESENT,   // Creation flags
-                NULL,                           // Environment block (NULL inherits safely)
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,   // Creation flags with unicode env
+                envArg,                         // Pass our custom environment block (containing TERM)
                 currentDirStd.c_str(),          // Starting directory (prevent DLL pollution)
                 &startupInfo.StartupInfo,       // Pointer to STARTUPINFO
                 &piClient)                      // Pointer to PROCESS_INFORMATION
@@ -217,8 +217,8 @@ bool ConPtyProcess::startProcess(const QString &shellPath, QStringList environme
             {
                 QMutexLocker locker(&m_bufferMutex);
                 m_buffer.m_readBuffer.append(szBuffer, dwBytesRead);
-                m_buffer.emitReadyRead();
             }
+            m_buffer.emitReadyRead();
         }
 
         // Clean-up client app's process-info & thread handles
