@@ -147,6 +147,7 @@ void AnsiParser::parseEscapeSequence(const QByteArray &seq, char cmd, QList<Ansi
             bool ok;
             int code = param.toInt(&ok);
             if (!ok) {
+                qWarning() << "[AnsiParser] SGR param conversion failed for:" << param;
                 k++;
                 continue;
             }
@@ -406,7 +407,7 @@ void AnsiParser::parseEscapeSequence(const QByteArray &seq, char cmd, QList<Ansi
         break;
     }
     default:
-        // Ignore other sequences for simplicity
+        qDebug() << "[AnsiParser] Ignored CSI sequence: cmd =" << cmd << "params =" << seqStr;
         break;
     }
 }

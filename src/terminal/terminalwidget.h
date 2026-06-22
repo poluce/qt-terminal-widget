@@ -4,8 +4,9 @@
 #include <QPlainTextEdit>
 #include "pty/iptyprocess.h"
 #include "ansiparser.h"
+#include "terminal_global.h"
 
-class TerminalWidget : public QPlainTextEdit
+class QT_TERMINAL_WIDGET_EXPORT TerminalWidget : public QPlainTextEdit
 {
     Q_OBJECT
 public:

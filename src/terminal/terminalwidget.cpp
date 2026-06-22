@@ -63,6 +63,7 @@ void TerminalWidget::setupUi()
     // Disable line wrap for standard terminal column-wise alignment
     setLineWrapMode(QPlainTextEdit::NoWrap);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     
     // Customize scroll bars for modern look
     verticalScrollBar()->setStyleSheet(
@@ -896,6 +897,10 @@ void TerminalWidget::insertFromMimeData(const QMimeData *source)
 void TerminalWidget::syncCursor()
 {
     QTextDocument *doc = document();
+    qDebug() << "[DEBUG] syncCursor -> blockCount:" << doc->blockCount()
+             << "First text:" << doc->begin().text()
+             << "startRow:" << m_screenBufferStartRow
+             << "cursorRow:" << m_cursorRow;
     // 保证行数恒等于 m_screenBufferStartRow + m_rows，防范意外溢出
     while (doc->blockCount() < m_screenBufferStartRow + m_rows) {
         QTextCursor endCursor(doc);
@@ -931,6 +936,9 @@ void TerminalWidget::syncCursor()
         p.setColor(QPalette::Text, Qt::transparent);
     }
     setPalette(p);
+
+    // 强制垂直滚动条精确对齐到逻辑起始行，防止微小行高测量溢出导致的视口虚假向上滚动
+    verticalScrollBar()->setValue(m_screenBufferStartRow);
 }
 
 void TerminalWidget::mousePressEvent(QMouseEvent *e)
