@@ -37,9 +37,8 @@
 
 ## 💡 借鉴与参考
 
-本项目的伪终端底层通信桥接代码借鉴并使用了 Vitaly Petrov 的开源项目：
-- **[ptyqt](https://github.com/kafeg/ptyqt)** (基于 MIT 协议开源)
-该依赖的源码（已移除 `.git` 后缀）整体作为普通子目录托管在 `3rdparty/ptyqt` 下，保证了项目的独立性和易克隆性。
+- **[ptyqt](https://github.com/kafeg/ptyqt)**：本项目的伪终端底层通信桥接代码借鉴并使用了该项目（基于 MIT 协议开源），其源码整体托管在 `3rdparty/ptyqt` 下，保证了项目的独立性与易克隆性。
+- **[Windows Terminal](https://github.com/microsoft/terminal)**：本项目在满行悬挂自动折行（DECAWM）和虚拟/物理光标重构逻辑的设计上，参考了微软官方 Windows Terminal 的文本缓冲区折行与视口对齐机制。
 
 ## 📄 开源许可证
 
