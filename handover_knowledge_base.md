@@ -134,3 +134,20 @@ graph TD
 > 1. `CloseHandle(m_hPipeIn)`
 > 2. `m_readThread->wait()`
 > * **底层机理**：Windows 下的 `ReadFile` 是同步阻塞的。如果线程被挂起在等待管道数据的读取中，单纯调用线程退出接口是无法将其唤醒的。必须先强制调用 `CloseHandle` 强行废弃该管道，使子线程内的 `ReadFile` 立即返回失败（错误码为管道已关闭），从而在子线程退出后再安全地执行主线程的 `wait()`。如果调换此顺序，会导致程序在退出时陷入永久性死锁。
+
+---
+
+## 6. GDB 调试命令与崩溃调用栈捕获 (GDB Debugging Guide)
+
+在 Windows (MinGW 64-bit) 调试环境或在自动化脚本环境中调试本程序崩溃/死锁时，建议启用 **GDB 非交互式批处理模式** 进行调试。这能非常快速地捕获致命错误时的代码上下文及调用栈。
+
+* **调试命令**：
+  ```powershell
+  gdb -batch -ex "run" -ex "bt" ./build/Desktop_Qt_6_11_0_MinGW_64_bit-Release/qt-terminal-widget.exe
+  ```
+  * `-batch`：启用批处理模式，程序执行结束后 GDB 自动退出。
+  * `-ex "run"`：在 GDB 启动后立即运行目标程序。
+  * `-ex "bt"`：如果程序中途发生 Crash / Segmentation fault 崩溃，立即输出当前的函数调用栈（Backtrace）以辅助定位异常代码行。
+* **开发辅助建议**：
+  * 确保编译选项中开启了调试符号（即 CMake 编译时使用 `-DCMAKE_BUILD_TYPE=Debug` 或 `RelWithDebInfo` 构建模式），否则 GDB 捕获的调用栈将缺失源码行号和函数符号。
+  * 若程序被死锁挂起，可在 GDB 启动后通过手动中断（`Ctrl+C`）并输入 `thread apply all bt` 来检查所有线程的锁冲突及阻塞堆栈。
