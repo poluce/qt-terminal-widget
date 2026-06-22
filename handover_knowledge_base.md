@@ -93,3 +93,26 @@ graph TD
 3. **第三步：待完善的遗留任务建议**
    * **鼠标追踪支持（Mouse Tracking）**：目前项目尚未完整捕获并转发鼠标点击/滚轮事件（如在终端运行 `htop` / `Midnight Commander` 时通过鼠标点击菜单）。可后续在 `TerminalWidget::mousePressEvent` 中编码对应的 ANSI 鼠标报告序列（如 `\u001b[M...`）并写入进程管道。
    * **高亮选择改进**：由于我们隐藏了系统的物理光标，用鼠标在 `TerminalWidget` 里拉拽选择文本时的背景反色高亮显示仍需与我们的虚拟光标做视觉协调。
+
+---
+
+## 5. 补充架构设计要点与避坑指南 (Architecture Details & Pitfalls)
+
+为了确保后续改动不破坏已有的系统稳定性，请在开发时严格遵守以下架构设计与并发原则：
+
+> [!CAUTION]
+> ### 1. 多线程与 Qt UI 线程独占限制（核心并发规则）
+> 底层 PTY 数据的读取在独立子线程中进行（如 [conptyprocess.cpp](file:///F:/B_My_Document/GitHub/qt-terminal-widget/src/pty/conptyprocess.cpp) 的后台读取 Loop），而终端渲染使用的是 `QTextDocument` 与 `QTextCursor`。
+> * **绝对禁忌**：**严禁在后台读取线程中直接调用任何 UI 操作或操作 QTextDocument / QTextCursor！** Qt 限制非 GUI 线程访问 GUI 资源，否则会导致瞬间崩溃或随机死锁。
+> * **正确做法**：通过 `PtyBuffer`（加锁互斥保护）缓存数据，在主线程中使用 Qt 的 `readyRead` 信号槽机制接收字节，将渲染排版操作完全局限在 GUI 主线程中执行。
+
+> [!TIP]
+> ### 2. 状态机流式解析与调试日志（AnsiParser Trace）
+> `AnsiParser` 是流式字节解析器。如果后续遇到特殊的转义字符（例如下划线、双线、隐藏）显示不正确，可在 `AnsiParser::parse` 内部调用 `toggleTrace()` 或添加调试输出。由于 PTY 返回的数据可能是拼包或断包，任何复杂的字符控制状态必须确保是**可增量持久化存储**的，避免每次解析时覆盖未完成的 ANSI 控制标志。
+
+> [!NOTE]
+> ### 3. 历史行重新排列（Reflow）的架构选型建议
+> 目前当窗口尺寸缩放（Resize）时，我们虽然向 ConPTY 报告了新的网格大小，但没有执行完整的历史字符重新排版（Reflow）。
+> * 如果后续要实现完整的 Reflow（即拉大窗口时原本折行的文字自动拼回一行，收缩窗口时历史文字重新排满折行）：
+>   - **建议不要使用 QTextDocument 原生的折行！** 这会导致终端字符坐标定位无法预测。
+>   - **推荐方案**：由 C++ 端自行实现一个与渲染分离的二维字符网格缓冲区（Character Grid Buffer）。每次 Resize 后，重新计算内存缓冲区中的物理折行坐标，然后再把排好版的字符串全量重写回 `QTextDocument`。
