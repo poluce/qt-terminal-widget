@@ -21,6 +21,8 @@ add_library(qtterminalwidget
     src/pty/ptyqt.cpp
     src/terminal/ansiparser.h
     src/terminal/ansiparser.cpp
+    src/terminal/inputtranslator.h
+    src/terminal/inputtranslator.cpp
     src/terminal/terminal_global.h
     src/terminal/terminalwidget.h
     src/terminal/terminalwidget.cpp

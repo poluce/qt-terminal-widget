@@ -7,6 +7,20 @@
 - **跨平台 PTY 支持**：
   - **Windows**：原生支持现代微软 **ConPTY**（Pseudo Console）接口。
   - **Linux/Unix**：支持标准系统的 **Unix PTY** 伪终端。
+- **输入协议翻译层**：
+  - 已引入独立的 `InputTranslator`，统一处理键盘、鼠标、Win32 input mode、bracketed paste 与 IME 提交路径。
+- **主缓冲区滚动体验修正**：
+  - 用户未手动滚动时，输出会持续跟随到底部；
+  - 主缓冲区 `clear/home` 重绘场景会保持顶部可见，避免 PowerShell 启动页被错误顶走；
+  - 用户滚动到历史区后，新的输出不会无条件抢回底部。
+- **鼠标协议支持**：
+  - 支持 `1000/1002/1003` 鼠标追踪模式；
+  - 支持 `1005/1006` 鼠标编码模式；
+  - 备用屏仅在程序显式声明接管鼠标时才转发滚轮与鼠标事件。
+- **IME 基础支持**：
+  - 支持 `commit` 提交；
+  - 已接管 `preedit` 预编辑串绘制与候选框锚点定位；
+  - 适合继续朝“终端原生级 IME 体验”演进。
 - **高精度光标渲染与定位**：通过对 `QTextBlock` 以及 `QTextFragment` 的 `fontStretch` 遍历，精确计算字符宽度，彻底消除由于字符水平缩放导致的光标定位与网格对齐偏差。
 - **物理光标隐藏与虚拟反显光标**：通过将系统自带竖线光标设为透明来彻底隐藏硬件光标；利用 ANSI 反显序列（`SGR 7`/`SGR 27`）完美渲染出方块形的虚拟光标。
 - **满行自动折行**：支持终端标准的悬挂折行行为（`DECAWM`），在输入字符超出列宽 `m_cols` 时自动移至下一行首。
@@ -34,6 +48,21 @@
    ```
 3. 运行程序：
    编译成功后，在 `build` 目录下生成可执行程序 `qt-terminal-widget`，直接运行即可启动嵌入式终端窗口。
+
+## 🧪 调试日志
+
+项目默认只打开用于视口/跟随输出诊断的 `[VIEWPORT]` 日志，普通 `[TRACE]` 与高频字节流日志默认关闭。
+
+当前日志开关硬编码在 [terminal_global.h](/abs/F:/B_My_Document/GitHub/qt-terminal-widget/src/terminal/terminal_global.h)：
+
+- `TraceEnabled`
+- `VerboseTraceEnabled`
+- `ViewportTraceEnabled`
+
+建议：
+
+- 排查普通行为问题时，只保留 `ViewportTraceEnabled = true`
+- 只有在需要看原始 PTY 字节流、键盘逐事件或 parser 细节时，才临时打开另外两级日志
 
 ## 💡 借鉴与参考
 

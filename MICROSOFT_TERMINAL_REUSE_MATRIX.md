@@ -205,6 +205,12 @@
   - application cursor keys
   - IME preedit / commit
 
+当前状态更新：
+
+- 本项目已经引入独立的 `InputTranslator`
+- 键盘、粘贴、Win32 input mode、鼠标模式与 IME 提交路径已不再直接散落在单一事件分支里
+- 后续重点不再是“是否要抽 translator”，而是“如何继续扩展其协议覆盖面并减少 `TerminalWidget` 中残余输入策略逻辑”
+
 ### 6.5 text buffer：这是最该优先学习甚至借鉴设计的部分
 
 判定：**高优先级选择性移植**
@@ -427,4 +433,3 @@
 
 - 本仓库体验目标文档  
   [WINDOWS_TERMINAL_EXPERIENCE_PARITY_SPEC.md](./WINDOWS_TERMINAL_EXPERIENCE_PARITY_SPEC.md)
-

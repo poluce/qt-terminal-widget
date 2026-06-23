@@ -1,4 +1,5 @@
 #include "ansiparser.h"
+#include "terminal_global.h"
 #include <QStringList>
 #include <QDebug>
 
@@ -387,9 +388,18 @@ void AnsiParser::parseEscapeSequence(const QByteArray &seq, char cmd, QList<Ansi
                 AnsiToken token;
                 token.type = AnsiToken::Win32InputModeReset;
                 tokens.append(token);
-            } else if (firstParam == "?1000" || firstParam == "?1002" || firstParam == "?1003" || firstParam == "?1005" || firstParam == "?1006") {
+            } else if (firstParam == "?2004") {
+                AnsiToken token;
+                token.type = AnsiToken::BracketedPasteReset;
+                tokens.append(token);
+            } else if (firstParam == "?1000" || firstParam == "?1002" || firstParam == "?1003") {
                 AnsiToken token;
                 token.type = AnsiToken::MouseTrackingReset;
+                token.val1 = firstParam.mid(1).toInt();
+                tokens.append(token);
+            } else if (firstParam == "?1005" || firstParam == "?1006") {
+                AnsiToken token;
+                token.type = AnsiToken::MouseEncodingReset;
                 token.val1 = firstParam.mid(1).toInt();
                 tokens.append(token);
             }
@@ -411,9 +421,18 @@ void AnsiParser::parseEscapeSequence(const QByteArray &seq, char cmd, QList<Ansi
                 AnsiToken token;
                 token.type = AnsiToken::Win32InputModeSet;
                 tokens.append(token);
-            } else if (firstParam == "?1000" || firstParam == "?1002" || firstParam == "?1003" || firstParam == "?1005" || firstParam == "?1006") {
+            } else if (firstParam == "?2004") {
+                AnsiToken token;
+                token.type = AnsiToken::BracketedPasteSet;
+                tokens.append(token);
+            } else if (firstParam == "?1000" || firstParam == "?1002" || firstParam == "?1003") {
                 AnsiToken token;
                 token.type = AnsiToken::MouseTrackingSet;
+                token.val1 = firstParam.mid(1).toInt();
+                tokens.append(token);
+            } else if (firstParam == "?1005" || firstParam == "?1006") {
+                AnsiToken token;
+                token.type = AnsiToken::MouseEncodingSet;
                 token.val1 = firstParam.mid(1).toInt();
                 tokens.append(token);
             }
@@ -449,7 +468,7 @@ void AnsiParser::parseEscapeSequence(const QByteArray &seq, char cmd, QList<Ansi
         break;
     }
     default:
-        qDebug() << "[AnsiParser] Ignored CSI sequence: cmd =" << cmd << "params =" << seqStr;
+        QT_TERMINAL_VERBOSE_TRACE_STREAM << "[AnsiParser] Ignored CSI sequence: cmd =" << cmd << "params =" << seqStr;
         break;
     }
 }

@@ -237,20 +237,20 @@
 
 **当前状态判断**
 
-- 已有入口
-- 但缺少统一 translator 层
-- 目前更像“事件分支拼接”
+- 已有统一 translator 层
+- 当前核心输入路径已由 `InputTranslator` 统一承接
+- 但 `TerminalWidget` 中仍残留与视口、备用屏、IME 状态相关的少量策略逻辑
 
 **主要缺口**
 
-- `Alt/Meta` 语义不完整
-- bracketed paste 语义缺失
-- IME 只有 commit，无 preedit 模型
-- 选择/粘贴/焦点仍靠控件默认行为修补
+- `Alt/Meta` 语义仍需继续验证
+- 真实程序级 keyboard compatibility 仍需扩大回归覆盖
+- IME 虽然已具备 preedit 模型，但仍未完全达到“终端原生级”状态
+- 选择/粘贴/焦点仍有部分策略留在宿主控件层
 
 **推荐动作**
 
-- 抽出 `InputTranslator`
+- 继续保留并扩展 `InputTranslator`
 - 让 Qt 事件先进入 translator，再转为：
   - VT 输入流
   - 模式切换
@@ -327,13 +327,17 @@
 
 **当前状态判断**
 
-- 最近已从“总是抢到底部”修到“基本保留滚动位置”
+- 最近已从“总是抢到底部”修到：
+  - 浏览历史时保位
+  - 持续追加输出时跟随到底部
+  - 主缓冲区 clear/home 重绘时保持顶部可见
 - 但仍未形成独立模型
 
 **主要缺口**
 
 - 状态定义仍散落
 - 选择、单击、输入、输出与视口关系未完全统一
+- 仍需继续验证 `Claude Code`、`PSReadLine` 这类主缓冲区局部重绘程序的长会话行为
 
 **推荐动作**
 
@@ -375,7 +379,7 @@
 **主要缺口**
 
 - 浏览历史时的隐藏/冻结策略未完全终端化
-- IME 锚点未独立
+- IME 锚点虽已显式化，但仍与主缓冲区模型耦合
 - 视觉光标与逻辑光标未彻底分离
 
 **推荐动作**
@@ -595,4 +599,3 @@
 - 微软关键模块  
   <https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalControl/TermControl.cpp>  
   <https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalCore/Terminal.hpp>
-

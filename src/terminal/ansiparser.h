@@ -44,7 +44,11 @@ struct AnsiToken
         MouseTrackingSet,
         MouseTrackingReset,
         DeviceAttributesQuery,
-        SecondaryDeviceAttributesQuery
+        SecondaryDeviceAttributesQuery,
+        BracketedPasteSet,
+        BracketedPasteReset,
+        MouseEncodingSet,
+        MouseEncodingReset
     };
     Type type;
     QString text;

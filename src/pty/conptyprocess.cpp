@@ -201,16 +201,33 @@ bool ConPtyProcess::startProcess(const QString &shellPath, QStringList environme
     {
         while (!QThread::currentThread()->isInterruptionRequested())
         {
+            DWORD dwAvail = 0;
+            // 🌟 使用 PeekNamedPipe 预先检测管道中是否有数据可读。
+            // 传入 INVALID_HANDLE_VALUE 会安全地返回 FALSE，而不会抛出异常。
+            if (!PeekNamedPipe(m_hPipeIn, NULL, 0, NULL, &dwAvail, NULL))
+            {
+                // 管道损坏、关闭或句柄无效，安全退出读取循环
+                break;
+            }
+
+            if (dwAvail == 0)
+            {
+                // 🌟 暂时无可用数据时挂起 10ms，防止空轮询跑满 CPU。
+                // 避开同步阻塞 ReadFile，使得主线程可以在不引起 GDB 异常的前提下安全关闭句柄。
+                QThread::msleep(10);
+                continue;
+            }
+
             const DWORD BUFF_SIZE{ 1024 };
             char szBuffer[BUFF_SIZE]{};
             DWORD dwBytesRead{};
             
-            // ReadFile is blocking, but it will unblock when pipe is closed (e.g. child process terminates)
+            // 已确认有数据可读，此时 ReadFile 必会立即返回，绝无阻塞和 GDB 句柄解除冲突
             BOOL fRead = ReadFile(m_hPipeIn, szBuffer, BUFF_SIZE, &dwBytesRead, NULL);
 
             if (!fRead || dwBytesRead == 0)
             {
-                // Pipe broken or closed, exit reading loop
+                // 读取失败或管道关闭，退出
                 break;
             }
 
@@ -265,8 +282,8 @@ bool ConPtyProcess::kill()
                 m_hPipeIn = INVALID_HANDLE_VALUE;
             }
             m_readThread->quit();
-            m_readThread->wait(1000);
-            m_readThread->deleteLater();
+            m_readThread->wait(); // 无限等待，直至子线程安全跳出 ReadFile 并结束
+            delete m_readThread;  // 立即安全删除，避免延迟清理悬空
             m_readThread = nullptr;
         }
 

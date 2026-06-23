@@ -16,14 +16,17 @@ public:
     // Start a shell process inside the terminal widget
     bool startShell(const QString &shellPath);
     void stopShell();
+    QVariant inputMethodQuery(Qt::InputMethodQuery query) const override;
 
 protected:
     void keyPressEvent(QKeyEvent *e) override;
+    void keyReleaseEvent(QKeyEvent *e) override;
     void resizeEvent(QResizeEvent *e) override;
     void wheelEvent(QWheelEvent *e) override;
     void insertFromMimeData(const QMimeData *source) override;
     void mousePressEvent(QMouseEvent *e) override;
     void mouseReleaseEvent(QMouseEvent *e) override;
+    void mouseMoveEvent(QMouseEvent *e) override;
     void inputMethodEvent(QInputMethodEvent *e) override;
     void contextMenuEvent(QContextMenuEvent *e) override;
 
@@ -31,8 +34,9 @@ private slots:
     void onPtyReadyRead();
 
 private:
+    static bool shouldUseHeuristicAlternateScreen(bool win32InputModeActive, bool cursorVisible, bool hasChild);
+    void traceViewportState(const char *context) const;
     void setupUi();
-    void sendControlKey(QKeyEvent *e);
     void writeToPty(const QByteArray &data);
     void handleToken(const AnsiToken &token);
     void writeTextSegment(const QString &textToInsert, const QTextCharFormat &format);
@@ -76,9 +80,20 @@ private:
     bool m_win32InputModeActive;
     bool m_isHeuristicAlternateBuffer;
     bool m_mouseTrackingEnabled;
-    int m_mouseProtocol;
+    int m_mouseTrackingMode;
+    int m_mouseEncoding;
     bool m_followTerminalOutput;
-    bool m_syncingScrollBar;
+    int m_syncingScrollBar;
+    bool m_bracketedPasteMode;
+
+    // Native preedit state variables
+    bool m_inPreedit;
+    int m_preeditAnchorRow;
+    int m_preeditAnchorCol;
+    QString m_currentPreeditString;
+
+    void applyPreedit(const QString &preeditStr);
+    void clearPreedit();
 };
 
 #endif // TERMINALWIDGET_H

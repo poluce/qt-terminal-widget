@@ -9,6 +9,7 @@
 #include <QTabWidget>
 #include <QProcessEnvironment>
 #include <QFile>
+#include <QDebug>
 #include "terminal/terminalwidget.h"
 
 int main(int argc, char *argv[])
@@ -90,7 +91,7 @@ int main(int argc, char *argv[])
         QWidget *w = tabWidget->widget(index);
         if (w) {
             tabWidget->removeTab(index);
-            w->deleteLater(); // 🌟 安全异步销毁 TerminalWidget，由于我们修复了析构死锁，这里将平滑释放资源并释放 PTY
+            w->deleteLater();
         }
     });
     

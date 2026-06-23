@@ -91,8 +91,8 @@ graph TD
    * **渲染与排版核心**：[terminalwidget.cpp](file:///F:/B_My_Document/GitHub/qt-terminal-widget/src/terminal/terminalwidget.cpp) —— 核心的富文本网格控制、字符写入、删除、高精度光标同步所在文件。
    * **管道进程封装**：[conptyprocess.cpp](file:///F:/B_My_Document/GitHub/qt-terminal-widget/src/pty/conptyprocess.cpp) —— 处理 Windows 原生 ConPTY 的生命周期及 I/O 线程读写。
 3. **第三步：待完善的遗留任务建议**
-   * **鼠标追踪支持（Mouse Tracking）**：目前项目尚未完整捕获并转发鼠标点击/滚轮事件（如在终端运行 `htop` / `Midnight Commander` 时通过鼠标点击菜单）。可后续在 `TerminalWidget::mousePressEvent` 中编码对应的 ANSI 鼠标报告序列（如 `\u001b[M...`）并写入进程管道。
    * **高亮选择改进**：由于我们隐藏了系统的物理光标，用鼠标在 `TerminalWidget` 里拉拽选择文本时的背景反色高亮显示仍需与我们的虚拟光标做视觉协调。
+   * **主缓冲区模型独立化**：当前虽然已引入 `InputTranslator` 并显著改善滚动、鼠标与 IME 交互，但主缓冲区真相源仍然主要依赖 `QTextDocument`。若要继续逼近 Windows Terminal 体验，应优先抽离真正的 `TerminalBuffer / ViewportModel / CursorModel`。
 
 ---
 
@@ -109,6 +109,8 @@ graph TD
 > [!TIP]
 > ### 2. 状态机流式解析与调试日志（AnsiParser Trace）
 > `AnsiParser` 是流式字节解析器。如果后续遇到特殊的转义字符（例如下划线、双线、隐藏）显示不正确，可在 `AnsiParser::parse` 内部调用 `toggleTrace()` 或添加调试输出。由于 PTY 返回的数据可能是拼包或断包，任何复杂的字符控制状态必须确保是**可增量持久化存储**的，避免每次解析时覆盖未完成的 ANSI 控制标志。
+>
+> * **新增经验**：当前项目已经将日志分成 `TRACE / VERBOSE / VIEWPORT` 三层，并在 [terminal_global.h](/abs/F:/B_My_Document/GitHub/qt-terminal-widget/src/terminal/terminal_global.h) 中统一硬编码配置。排查“类似 Claude Code 这类程序在主缓冲区里做局部重绘”问题时，优先只开 `VIEWPORT` 层，避免 PTY 原始十六进制字节流刷屏淹没真正有用的信息。
 
 > [!NOTE]
 > ### 3. 历史行重新排列（Reflow）的架构选型建议
@@ -121,6 +123,12 @@ graph TD
 > ### 4. 滚动历史上限与光标行坐标补偿（内存防泄露陷阱）
 > 随着终端中命令不断运行，段落数（`QTextBlock`）会无限堆积导致内存暴涨。若后续要实现滚动历史限制（Scrollback Limit），必须在顶部物理删除超限的 `QTextBlock`。
 > * **隐藏关联**：一旦顶部的 Block 被删除，`QTextDocument` 中所有后续行的物理行号索引（Index）会整体向前偏移。此时必须在逻辑上对虚拟光标的绝对行坐标进行**等额减量补偿**，否则虚拟光标定位将瞬间错位。
+
+> [!IMPORTANT]
+> ### 5. 备用屏判定默认只信显式 VT 序列
+> 项目早期曾使用 `Win32InputModeActive + 光标隐藏 + 子进程存在` 的启发式方式自动切入备用屏，这会把 `Claude Code` 这类“会局部重绘、会隐藏光标、会开 Win32 input mode、但并不是真正使用 alternate buffer”的程序误判成全屏 TUI。
+> * **当前约束**：默认只在收到显式 `?1049h/?1047h/?47h` 等 VT 备用屏切换序列时进入备用屏。
+> * **工程含义**：如果后续有人想重新打开 heuristic alternate screen，必须先补完整的程序级回归测试矩阵，否则极易再次破坏 `Claude Code`、`PSReadLine` 等主缓冲区交互程序。
 
 > [!TIP]
 > ### 5. 高 DPI 缩放与等宽字体非整数像素对齐（渲染细节）

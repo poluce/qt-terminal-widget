@@ -1,4 +1,5 @@
 #include "terminalwidget.h"
+#include "inputtranslator.h"
 #include <QKeyEvent>
 #include <QClipboard>
 #include <QGuiApplication>
@@ -45,6 +46,67 @@ bool hasActiveChildProcess(qint64 parentPid) {
     CloseHandle(hSnapshot);
     return hasChild;
 }
+
+const char *tokenTypeName(AnsiToken::Type type)
+{
+    switch (type) {
+    case AnsiToken::Text: return "Text";
+    case AnsiToken::ClearScreen: return "ClearScreen";
+    case AnsiToken::ClearLine: return "ClearLine";
+    case AnsiToken::CursorPosition: return "CursorPosition";
+    case AnsiToken::Backspace: return "Backspace";
+    case AnsiToken::CursorUp: return "CursorUp";
+    case AnsiToken::CursorDown: return "CursorDown";
+    case AnsiToken::CursorForward: return "CursorForward";
+    case AnsiToken::CursorBackward: return "CursorBackward";
+    case AnsiToken::CursorNextLine: return "CursorNextLine";
+    case AnsiToken::CursorPrevLine: return "CursorPrevLine";
+    case AnsiToken::CursorHorizontalAbsolute: return "CursorHorizontalAbsolute";
+    case AnsiToken::SaveCursor: return "SaveCursor";
+    case AnsiToken::RestoreCursor: return "RestoreCursor";
+    case AnsiToken::EraseInDisplay: return "EraseInDisplay";
+    case AnsiToken::EraseInLine: return "EraseInLine";
+    case AnsiToken::DeleteCharacter: return "DeleteCharacter";
+    case AnsiToken::EraseCharacter: return "EraseCharacter";
+    case AnsiToken::InsertLine: return "InsertLine";
+    case AnsiToken::DeleteLine: return "DeleteLine";
+    case AnsiToken::HideCursor: return "HideCursor";
+    case AnsiToken::ShowCursor: return "ShowCursor";
+    case AnsiToken::EnterAlternateBuffer: return "EnterAlternateBuffer";
+    case AnsiToken::ExitAlternateBuffer: return "ExitAlternateBuffer";
+    case AnsiToken::Win32InputModeSet: return "Win32InputModeSet";
+    case AnsiToken::Win32InputModeReset: return "Win32InputModeReset";
+    case AnsiToken::MouseTrackingSet: return "MouseTrackingSet";
+    case AnsiToken::MouseTrackingReset: return "MouseTrackingReset";
+    case AnsiToken::DeviceAttributesQuery: return "DeviceAttributesQuery";
+    case AnsiToken::SecondaryDeviceAttributesQuery: return "SecondaryDeviceAttributesQuery";
+    case AnsiToken::BracketedPasteSet: return "BracketedPasteSet";
+    case AnsiToken::BracketedPasteReset: return "BracketedPasteReset";
+    case AnsiToken::MouseEncodingSet: return "MouseEncodingSet";
+    case AnsiToken::MouseEncodingReset: return "MouseEncodingReset";
+    }
+    return "Unknown";
+}
+
+QString summarizeTokens(const QList<AnsiToken> &tokens)
+{
+    QStringList parts;
+    const int limit = qMin(tokens.size(), 8);
+    for (int i = 0; i < limit; ++i) {
+        const AnsiToken &token = tokens.at(i);
+        QString part = QString::fromLatin1(tokenTypeName(token.type));
+        if (token.type == AnsiToken::Text) {
+            part += QString("(%1)").arg(token.text.size());
+        } else if (token.val1 >= 0) {
+            part += QString("(%1)").arg(token.val1);
+        }
+        parts.append(part);
+    }
+    if (tokens.size() > limit) {
+        parts.append(QString("+%1 more").arg(tokens.size() - limit));
+    }
+    return parts.join(", ");
+}
 }
 
 
@@ -67,16 +129,26 @@ TerminalWidget::TerminalWidget(QWidget *parent)
     , m_win32InputModeActive(false)
     , m_isHeuristicAlternateBuffer(false)
     , m_mouseTrackingEnabled(false)
-    , m_mouseProtocol(0)
+    , m_mouseTrackingMode(0)
+    , m_mouseEncoding(0)
     , m_followTerminalOutput(true)
-    , m_syncingScrollBar(false)
+    , m_syncingScrollBar(0)
+    , m_bracketedPasteMode(false)
+    , m_inPreedit(false)
+    , m_preeditAnchorRow(0)
+    , m_preeditAnchorCol(0)
 {
     setupUi();
 }
 
 TerminalWidget::~TerminalWidget()
 {
-    stopShell();
+    // 🌟 静默关闭 PTY，避免在 widget 析构过程中触发任何 GUI/文档重绘操作以防崩溃
+    if (m_pty) {
+        m_pty->kill();
+        delete m_pty;
+        m_pty = nullptr;
+    }
     if (m_alternateDoc) {
         delete m_alternateDoc;
     }
@@ -137,26 +209,34 @@ void TerminalWidget::setupUi()
     m_primaryDoc = document();
 
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
-        if (m_syncingScrollBar || m_isAlternateBuffer) {
+        if (m_syncingScrollBar > 0 || m_isAlternateBuffer) {
             return;
         }
+        const bool oldFollow = m_followTerminalOutput;
         m_followTerminalOutput = (value >= verticalScrollBar()->maximum());
+        if (oldFollow != m_followTerminalOutput) {
+            QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] valueChanged"
+                                             << "value =" << value
+                                             << "maximum =" << verticalScrollBar()->maximum()
+                                             << "follow =" << m_followTerminalOutput;
+            traceViewportState("scrollbar-valueChanged");
+        }
     });
 }
 
 bool TerminalWidget::startShell(const QString &shellPath)
 {
-    qDebug() << "[TRACE] startShell called with path:" << shellPath
-             << "viewport width:" << viewport()->width() << "height:" << viewport()->height();
+    QT_TERMINAL_TRACE_STREAM << "[TRACE] startShell called with path:" << shellPath
+                             << "viewport width:" << viewport()->width() << "height:" << viewport()->height();
 
     if (m_isShellRunning) {
-        qDebug() << "[TRACE] startShell: shell is already running.";
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] startShell: shell is already running.";
         return false;
     }
 
     // 检测是否拥有合理的物理大小。若未准备就绪，开启延迟启动（Lazy Start）防止初始超小尺寸导致输出截断
     if (viewport()->width() < 200 || viewport()->height() < 100) {
-        qDebug() << "[TRACE] startShell: pending startup due to small viewport size.";
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] startShell: pending startup due to small viewport size.";
         m_pendingShellPath = shellPath.isEmpty() ? "default" : shellPath;
         return true;
     }
@@ -209,7 +289,7 @@ bool TerminalWidget::startShell(const QString &shellPath)
                    << ", resolved path:" << realShellPath;
         return false;
     }
-    qDebug() << "[TRACE] startShell: resolved shell path =" << realShellPath;
+    QT_TERMINAL_TRACE_STREAM << "[TRACE] startShell: resolved shell path =" << realShellPath;
 
     m_pty = PtyQt::createPtyProcess();
     if (!m_pty) {
@@ -229,7 +309,7 @@ bool TerminalWidget::startShell(const QString &shellPath)
 
     m_cols = cols;
     m_rows = rows;
-    qDebug() << "[TRACE] startShell: starting process with cols =" << cols << "rows =" << rows;
+    QT_TERMINAL_TRACE_STREAM << "[TRACE] startShell: starting process with cols =" << cols << "rows =" << rows;
 
     // Load environment and explicitly inject terminal capability variables
     QProcessEnvironment procEnv = QProcessEnvironment::systemEnvironment();
@@ -247,7 +327,7 @@ bool TerminalWidget::startShell(const QString &shellPath)
     }
 
     m_isShellRunning = true;
-    qDebug() << "[TRACE] startShell: process started successfully. PID debug info:" << m_pty->dumpDebugInfo();
+    QT_TERMINAL_TRACE_STREAM << "[TRACE] startShell: process started successfully. PID debug info:" << m_pty->dumpDebugInfo();
 
     m_parser.reset();
     clear();
@@ -263,7 +343,7 @@ bool TerminalWidget::startShell(const QString &shellPath)
 
     // Connect readyRead signal using QueuedConnection to guarantee thread-safe GUI updates on the main thread
     connect(m_pty->notifier(), &QIODevice::readyRead, this, &TerminalWidget::onPtyReadyRead, Qt::QueuedConnection);
-    qDebug() << "[TRACE] startShell: connected readyRead signal with QueuedConnection.";
+    QT_TERMINAL_TRACE_STREAM << "[TRACE] startShell: connected readyRead signal with QueuedConnection.";
 
     setFocus();
     return true;
@@ -271,6 +351,7 @@ bool TerminalWidget::startShell(const QString &shellPath)
 
 void TerminalWidget::stopShell()
 {
+    clearPreedit();
     if (m_pty) {
         m_pty->kill();
         delete m_pty;
@@ -280,23 +361,50 @@ void TerminalWidget::stopShell()
     m_win32InputModeActive = false;
     m_isHeuristicAlternateBuffer = false;
     m_isAlternateBuffer = false;
+    m_bracketedPasteMode = false;
     m_mouseTrackingEnabled = false;
-    m_mouseProtocol = 0;
+    m_mouseTrackingMode = 0;
+    m_mouseEncoding = 0;
+    setMouseTracking(false);
     m_followTerminalOutput = true;
 }
 
 void TerminalWidget::onPtyReadyRead()
 {
     if (!m_pty) {
-        qDebug() << "[TRACE] onPtyReadyRead called but m_pty is NULL.";
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] onPtyReadyRead called but m_pty is NULL.";
         return;
     }
 
     QByteArray data = m_pty->readAll();
-    qDebug() << "[TRACE] onPtyReadyRead: read bytes =" << data.size() << "hex =" << data.toHex();
+    QT_TERMINAL_VERBOSE_TRACE_STREAM << "[TRACE] onPtyReadyRead: read bytes =" << data.size() << "hex =" << data.toHex();
     if (data.isEmpty()) return;
 
+    QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] readyRead begin"
+                                     << "bytes =" << data.size()
+                                     << "follow =" << m_followTerminalOutput
+                                     << "scroll =" << verticalScrollBar()->value()
+                                     << "maximum =" << verticalScrollBar()->maximum()
+                                     << "startRow =" << m_screenBufferStartRow
+                                     << "cursor =" << m_cursorRow << m_cursorCol;
+
+    QString savedPreedit = m_currentPreeditString;
+    bool wasInPreedit = m_inPreedit;
+    if (wasInPreedit) {
+        clearPreedit();
+    }
+
+    // 🌟 记录 PTY 数据写入前的滚动条位置和旧起始行，以便后面做精确的历史浏览滚动补偿
+    int preservedScrollValue = verticalScrollBar()->value();
+    int oldStartRow = m_screenBufferStartRow;
+
+    // 🌟 开启保护，防止数据解析和光标定位引起 valueChanged 信号强行将 m_followTerminalOutput 改为 true
+    m_syncingScrollBar++;
+
     QList<AnsiToken> tokens = m_parser.parse(data);
+    QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] readyRead tokens"
+                                     << "count =" << tokens.size()
+                                     << "summary =" << summarizeTokens(tokens);
 
     QTextCursor cursor = textCursor();
     cursor.beginEditBlock();
@@ -309,6 +417,29 @@ void TerminalWidget::onPtyReadyRead()
 
     cursor.endEditBlock();
     syncCursor();
+
+    // 🌟 计算在此期间由于自动换行或命令输出导致的主屏幕内容自增行数
+    int startRowDelta = m_screenBufferStartRow - oldStartRow;
+
+    // 🌟 如果当前是主屏且是非跟随（历史浏览）状态，补偿滚动条位置以确保历史文本视图物理上绝对静止
+    if (!m_isAlternateBuffer && !m_followTerminalOutput) {
+        preservedScrollValue += startRowDelta;
+        verticalScrollBar()->setValue(preservedScrollValue);
+    }
+
+    // 🌟 恢复同步保护标志
+    m_syncingScrollBar--;
+
+    if (wasInPreedit && !savedPreedit.isEmpty()) {
+        applyPreedit(savedPreedit);
+    }
+
+    QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] readyRead end"
+                                     << "startRowDelta =" << startRowDelta
+                                     << "follow =" << m_followTerminalOutput
+                                     << "scroll =" << verticalScrollBar()->value()
+                                     << "maximum =" << verticalScrollBar()->maximum();
+    traceViewportState("readyRead-end");
 }
 
 void TerminalWidget::writeTextSegment(const QString &textToInsert, const QTextCharFormat &format)
@@ -494,7 +625,7 @@ void TerminalWidget::handleToken(const AnsiToken &token)
 {
     switch (token.type) {
     case AnsiToken::EnterAlternateBuffer: {
-        qDebug() << "[TRACE] handleToken: ENTER ALTERNATE BUFFER. Previous mode:" << m_isAlternateBuffer;
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] handleToken: ENTER ALTERNATE BUFFER. Previous mode:" << m_isAlternateBuffer;
         if (!m_isAlternateBuffer) {
             m_primaryDoc = document();
             if (!m_alternateDoc) {
@@ -523,7 +654,7 @@ void TerminalWidget::handleToken(const AnsiToken &token)
         break;
     }
     case AnsiToken::ExitAlternateBuffer: {
-        qDebug() << "[TRACE] handleToken: EXIT ALTERNATE BUFFER. Previous mode:" << m_isAlternateBuffer;
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] handleToken: EXIT ALTERNATE BUFFER. Previous mode:" << m_isAlternateBuffer;
         if (m_isAlternateBuffer) {
             m_isAlternateBuffer = false;
             setDocument(m_primaryDoc);
@@ -543,6 +674,9 @@ void TerminalWidget::handleToken(const AnsiToken &token)
         break;
     }
     case AnsiToken::CursorPosition: {
+        QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] CursorPosition"
+                                         << "row =" << token.cursorRow
+                                         << "col =" << token.cursorCol;
         m_cursorRow = qBound(1, token.cursorRow, m_rows);
         m_cursorCol = qBound(1, token.cursorCol, m_cols);
         break;
@@ -640,6 +774,10 @@ void TerminalWidget::handleToken(const AnsiToken &token)
     case AnsiToken::ClearScreen:
     case AnsiToken::EraseInDisplay: {
         int mode = (token.type == AnsiToken::ClearScreen) ? 2 : token.val1;
+        QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] EraseInDisplay"
+                                         << "mode =" << mode
+                                         << "before startRow =" << m_screenBufferStartRow
+                                         << "cursor =" << m_cursorRow << m_cursorCol;
         if (mode == 2 || mode == 3) {
             clear();
             QTextDocument *doc = document();
@@ -653,6 +791,7 @@ void TerminalWidget::handleToken(const AnsiToken &token)
             m_cursorRow = 1;
             m_cursorCol = 1;
             m_screenBufferStartRow = 0;
+            QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] EraseInDisplay reset-screen";
         } else if (mode == 0) {
             QTextDocument *doc = document();
             int docRow = m_screenBufferStartRow + m_cursorRow - 1;
@@ -876,22 +1015,45 @@ void TerminalWidget::handleToken(const AnsiToken &token)
         checkHeuristicAlternateScreen();
         break;
     }
+    case AnsiToken::BracketedPasteSet: {
+        m_bracketedPasteMode = true;
+        break;
+    }
+    case AnsiToken::BracketedPasteReset: {
+        m_bracketedPasteMode = false;
+        break;
+    }
     case AnsiToken::MouseTrackingSet: {
         m_mouseTrackingEnabled = true;
-        m_mouseProtocol = token.val1;
+        m_mouseTrackingMode = token.val1;
+        if (m_mouseTrackingMode == 1002 || m_mouseTrackingMode == 1003) {
+            setMouseTracking(true);
+        } else {
+            setMouseTracking(false);
+        }
         break;
     }
     case AnsiToken::MouseTrackingReset: {
         m_mouseTrackingEnabled = false;
+        m_mouseTrackingMode = 0;
+        setMouseTracking(false);
+        break;
+    }
+    case AnsiToken::MouseEncodingSet: {
+        m_mouseEncoding = token.val1;
+        break;
+    }
+    case AnsiToken::MouseEncodingReset: {
+        m_mouseEncoding = 0;
         break;
     }
     case AnsiToken::DeviceAttributesQuery: {
-        qDebug() << "[TRACE] handleToken: DEVICE ATTRIBUTES QUERY, replying xterm basic DA.";
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] handleToken: DEVICE ATTRIBUTES QUERY, replying xterm basic DA.";
         writeToPty("\033[?64;1;2;6;9;15;22c");
         break;
     }
     case AnsiToken::SecondaryDeviceAttributesQuery: {
-        qDebug() << "[TRACE] handleToken: SECONDARY DEVICE ATTRIBUTES QUERY, replying secondary DA.";
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] handleToken: SECONDARY DEVICE ATTRIBUTES QUERY, replying secondary DA.";
         writeToPty("\033[>0;115;0c");
         break;
     }
@@ -902,10 +1064,10 @@ void TerminalWidget::keyPressEvent(QKeyEvent *e)
 {
     int key = e->key();
     QString text = e->text();
-    qDebug() << "[TRACE] keyPressEvent: key =" << key << "text =" << text.toUtf8().toHex() << "modifiers =" << e->modifiers();
+    QT_TERMINAL_VERBOSE_TRACE_STREAM << "[TRACE] keyPressEvent: key =" << key << "text =" << text.toUtf8().toHex() << "modifiers =" << e->modifiers();
 
     if (!m_pty || !m_isShellRunning) {
-        qDebug() << "[TRACE] keyPressEvent: key IGNORED because shell is not running. m_pty =" << m_pty << "m_isShellRunning =" << m_isShellRunning;
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] keyPressEvent: key IGNORED because shell is not running. m_pty =" << m_pty << "m_isShellRunning =" << m_isShellRunning;
         QPlainTextEdit::keyPressEvent(e);
         return;
     }
@@ -922,76 +1084,60 @@ void TerminalWidget::keyPressEvent(QKeyEvent *e)
         }
     }
 
-    // Check for Control keys (Ctrl + Key)
-    if ((e->modifiers() & Qt::ControlModifier) && key >= Qt::Key_A && key <= Qt::Key_Z) {
-        char ctrlChar = key - Qt::Key_A + 1;
-        writeToPty(QByteArray(1, ctrlChar));
+    TranslatorState state;
+    state.win32InputModeActive = m_win32InputModeActive;
+    state.bracketedPasteActive = m_bracketedPasteMode;
+
+    QByteArray data = InputTranslator::translateKeyEvent(e, state);
+    if (!data.isEmpty()) {
+        // 🌟 用户的键盘输入说明用户有交互意图，立即将跟随状态恢复为 true 并同步视口
+        m_followTerminalOutput = true;
+        syncCursor();
+
+        writeToPty(data);
+        e->accept();
+    } else {
+        // 如果在 win32 输入模式下，吃掉没有被转义出来的多余键盘事件，防止触发 QTextEdit 默认行为
+        if (m_win32InputModeActive) {
+            e->accept();
+        } else {
+            QPlainTextEdit::keyPressEvent(e);
+        }
+    }
+}
+
+void TerminalWidget::keyReleaseEvent(QKeyEvent *e)
+{
+    QT_TERMINAL_VERBOSE_TRACE_STREAM << "[TRACE] keyReleaseEvent: key =" << e->key() << "modifiers =" << e->modifiers();
+
+    if (!m_pty || !m_isShellRunning) {
+        QPlainTextEdit::keyReleaseEvent(e);
         return;
     }
 
-    switch (key) {
-    case Qt::Key_Return:
-    case Qt::Key_Enter:
-#ifdef Q_OS_WIN
-        writeToPty("\r\n");
-#else
-        writeToPty("\r");
-#endif
-        break;
-    case Qt::Key_Backspace:
-        writeToPty("\x7f"); // Standard backspace code for ConPTY
-        break;
-    case Qt::Key_Tab:
-        writeToPty("\t");
-        break;
-    case Qt::Key_Escape:
-        writeToPty("\033");
-        break;
-    case Qt::Key_Up:
-        qDebug() << "[TRACE] keyPressEvent: KEYBOARD ArrowUp triggered, writing ESC[A to Pty.";
-        writeToPty("\033[A");
-        break;
-    case Qt::Key_Down:
-        qDebug() << "[TRACE] keyPressEvent: KEYBOARD ArrowDown triggered, writing ESC[B to Pty.";
-        writeToPty("\033[B");
-        break;
-    case Qt::Key_Right:
-        writeToPty("\033[C");
-        break;
-    case Qt::Key_Left:
-        writeToPty("\033[D");
-        break;
-    case Qt::Key_Home:
-        writeToPty("\033[H");
-        break;
-    case Qt::Key_End:
-        writeToPty("\033[F");
-        break;
-    case Qt::Key_Delete:
-        writeToPty("\033[3~");
-        break;
-    case Qt::Key_PageUp:
-        writeToPty("\033[5~");
-        break;
-    case Qt::Key_PageDown:
-        writeToPty("\033[6~");
-        break;
-    default:
-        if (!text.isEmpty()) {
-            writeToPty(text.toUtf8());
+    if (m_win32InputModeActive) {
+        TranslatorState state;
+        state.win32InputModeActive = true;
+        state.bracketedPasteActive = m_bracketedPasteMode;
+
+        QByteArray data = InputTranslator::translateKeyEvent(e, state);
+        if (!data.isEmpty()) {
+            writeToPty(data);
         }
-        break;
+        e->accept();
+    } else {
+        QPlainTextEdit::keyReleaseEvent(e);
     }
 }
 
 void TerminalWidget::writeToPty(const QByteArray &data)
 {
-    qDebug() << "[TRACE] writeToPty: writing bytes =" << data.toHex();
+    QT_TERMINAL_VERBOSE_TRACE_STREAM << "[TRACE] writeToPty: writing bytes =" << data.toHex();
     if (m_pty) {
         qint64 bytes = m_pty->write(data);
-        qDebug() << "[TRACE] writeToPty: bytes written =" << bytes;
+        QT_TERMINAL_VERBOSE_TRACE_STREAM << "[TRACE] writeToPty: bytes written =" << bytes;
     } else {
-        qDebug() << "[TRACE] writeToPty: m_pty is NULL.";
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] writeToPty: m_pty is NULL.";
     }
 }
 
@@ -1008,19 +1154,19 @@ void TerminalWidget::resizeEvent(QResizeEvent *e)
     if (cols < 40) cols = 40;
     if (rows < 10) rows = 10;
 
-    qDebug() << "[TRACE] resizeEvent: viewport width =" << viewport()->width() << "height =" << viewport()->height()
-             << "cols =" << cols << "rows =" << rows << "pending shell path =" << m_pendingShellPath;
+    QT_TERMINAL_TRACE_STREAM << "[TRACE] resizeEvent: viewport width =" << viewport()->width() << "height =" << viewport()->height()
+                             << "cols =" << cols << "rows =" << rows << "pending shell path =" << m_pendingShellPath;
 
     // 1. 如果有延迟启动任务且 shell 还没运行，在这里拉起 Shell
     if (!m_pendingShellPath.isEmpty() && !m_isShellRunning) {
         // 只有物理尺寸足够合理时，才拉起 Shell
         if (viewport()->width() < 200 || viewport()->height() < 100) {
-            qDebug() << "[TRACE] resizeEvent: size not ready for lazy start yet.";
+            QT_TERMINAL_TRACE_STREAM << "[TRACE] resizeEvent: size not ready for lazy start yet.";
             return;
         }
         QString path = m_pendingShellPath == "default" ? "" : m_pendingShellPath;
         m_pendingShellPath.clear();
-        qDebug() << "[TRACE] resizeEvent: size ready, triggering Lazy Start shell.";
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] resizeEvent: size ready, triggering Lazy Start shell.";
         startShell(path);
         return;
     }
@@ -1031,8 +1177,8 @@ void TerminalWidget::resizeEvent(QResizeEvent *e)
         if (m_cols == cols && m_rows == rows) {
             return;
         }
-        qDebug() << "[TRACE] resizeEvent: resizing active shell process to cols =" << cols << "rows =" << rows
-                 << "isAlternateBuffer =" << m_isAlternateBuffer;
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] resizeEvent: resizing active shell process to cols =" << cols << "rows =" << rows
+                                 << "isAlternateBuffer =" << m_isAlternateBuffer;
         m_cols = cols;
         m_rows = rows;
         m_pty->resize(cols, rows);
@@ -1050,15 +1196,15 @@ void TerminalWidget::resizeEvent(QResizeEvent *e)
             cursor.insertText(initialBlank);
             m_cursorRow = 1;
             m_cursorCol = 1;
-            qDebug() << "[TRACE] resizeEvent (ALT): Cleared and re-initialized to m_rows =" << m_rows;
+            QT_TERMINAL_TRACE_STREAM << "[TRACE] resizeEvent (ALT): Cleared and re-initialized to m_rows =" << m_rows;
         } else {
             if (doc->blockCount() > m_rows) {
                 m_screenBufferStartRow = doc->blockCount() - m_rows;
             } else {
                 m_screenBufferStartRow = 0;
             }
-            qDebug() << "[TRACE] resizeEvent (PRIMARY): blockCount =" << doc->blockCount() << "m_rows =" << m_rows
-                     << "m_screenBufferStartRow =" << m_screenBufferStartRow;
+            QT_TERMINAL_TRACE_STREAM << "[TRACE] resizeEvent (PRIMARY): blockCount =" << doc->blockCount() << "m_rows =" << m_rows
+                                     << "m_screenBufferStartRow =" << m_screenBufferStartRow;
         }
 
         // 物理列宽截断：若宽度变窄，将每一行右侧超出新列宽 m_cols 边界的残留文本物理裁切，防止影响光标覆盖定位
@@ -1088,8 +1234,9 @@ void TerminalWidget::resizeEvent(QResizeEvent *e)
 
 void TerminalWidget::wheelEvent(QWheelEvent *e)
 {
-    qDebug() << "[TRACE] wheelEvent: delta =" << e->angleDelta() << "isAlternateBuffer =" << m_isAlternateBuffer
-             << "mouseTracking =" << m_mouseTrackingEnabled << "protocol =" << m_mouseProtocol;
+    QT_TERMINAL_VERBOSE_TRACE_STREAM << "[TRACE] wheelEvent: delta =" << e->angleDelta() << "isAlternateBuffer =" << m_isAlternateBuffer
+                                     << "mouseTracking =" << m_mouseTrackingEnabled << "trackingMode =" << m_mouseTrackingMode
+                                     << "encoding =" << m_mouseEncoding;
              
     if (m_isAlternateBuffer) {
         int deltaY = e->angleDelta().y();
@@ -1113,7 +1260,7 @@ void TerminalWidget::wheelEvent(QWheelEvent *e)
             
             QByteArray seq;
             int button = (deltaY > 0) ? 64 : 65;
-            if (m_mouseProtocol == 1006) {
+            if (m_mouseEncoding == 1006) {
                 for (int k = 0; k < clicks; ++k) {
                     seq.append(QString("\033[<%1;%2;%3M").arg(button).arg(col).arg(row).toUtf8());
                 }
@@ -1125,8 +1272,8 @@ void TerminalWidget::wheelEvent(QWheelEvent *e)
                     seq.append((char)(qMin(223, row) + 32));
                 }
             }
-            qDebug() << "[TRACE] wheelEvent (MOUSE REPORT): Sending mouse scroll VT sequence to Pty, button:"
-                     << button << "col:" << col << "row:" << row << "hex:" << seq.toHex();
+            QT_TERMINAL_VERBOSE_TRACE_STREAM << "[TRACE] wheelEvent (MOUSE REPORT): Sending mouse scroll VT sequence to Pty, button:"
+                                             << button << "col:" << col << "row:" << row << "hex:" << seq.toHex();
             writeToPty(seq);
         }
         e->accept();
@@ -1138,7 +1285,18 @@ void TerminalWidget::wheelEvent(QWheelEvent *e)
 void TerminalWidget::insertFromMimeData(const QMimeData *source)
 {
     if (m_pty && m_isShellRunning && source->hasText()) {
-        writeToPty(source->text().toUtf8());
+        // 🌟 用户的粘贴动作说明有交互输入，立即恢复跟随状态并同步视口
+        m_followTerminalOutput = true;
+        syncCursor();
+
+        TranslatorState state;
+        state.win32InputModeActive = m_win32InputModeActive;
+        state.bracketedPasteActive = m_bracketedPasteMode;
+
+        QByteArray data = InputTranslator::translatePasteEvent(source->text(), state);
+        if (!data.isEmpty()) {
+            writeToPty(data);
+        }
     }
 }
 
@@ -1146,10 +1304,22 @@ void TerminalWidget::syncCursor()
 {
     QTextDocument *doc = document();
     int preservedScrollValue = verticalScrollBar()->value();
-    qDebug() << "[DEBUG] syncCursor -> blockCount:" << doc->blockCount()
-             << "First text:" << doc->begin().text()
-             << "startRow:" << m_screenBufferStartRow
-             << "cursorRow:" << m_cursorRow;
+    QT_TERMINAL_VERBOSE_TRACE_STREAM << "[DEBUG] syncCursor -> blockCount:" << doc->blockCount()
+                                     << "First text:" << doc->begin().text()
+                                     << "startRow:" << m_screenBufferStartRow
+                                     << "cursorRow:" << m_cursorRow;
+    QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] syncCursor begin"
+                                     << "follow =" << m_followTerminalOutput
+                                     << "alternate =" << m_isAlternateBuffer
+                                     << "scroll =" << preservedScrollValue
+                                     << "maximum =" << verticalScrollBar()->maximum()
+                                     << "startRow =" << m_screenBufferStartRow
+                                     << "cursor =" << m_cursorRow << m_cursorCol
+                                     << "blocks =" << doc->blockCount();
+
+    // 🌟 在进入可能触发滚动条信号的任何编辑或光标操作之前，开启同步标志保护，防止 m_followTerminalOutput 被篡改
+    m_syncingScrollBar++;
+
     // 保证行数恒等于 m_screenBufferStartRow + m_rows，防范意外溢出
     while (doc->blockCount() < m_screenBufferStartRow + m_rows) {
         QTextCursor endCursor(doc);
@@ -1158,6 +1328,17 @@ void TerminalWidget::syncCursor()
     }
     
     int docRow = m_screenBufferStartRow + m_cursorRow - 1;
+
+    // 🌟 在非跟随且非备用屏的“历史浏览”状态下，如果逻辑光标所在行超出了可视视口，
+    // 将真实光标定位行限制在当前可视视口末尾，防止 setTextCursor 强行滚动拉走视口
+    if (!m_isAlternateBuffer && !m_followTerminalOutput) {
+        int visibleMin = verticalScrollBar()->value();
+        int visibleMax = visibleMin + m_rows - 1;
+        if (docRow < visibleMin || docRow > visibleMax) {
+            docRow = qBound(0, visibleMax, doc->blockCount() - 1);
+        }
+    }
+
     QTextBlock block = doc->findBlockByNumber(qBound(0, docRow, doc->blockCount() - 1));
     QTextCursor finalCursor(block);
     int currentWidth = blockDisplayWidth(block);
@@ -1189,16 +1370,30 @@ void TerminalWidget::syncCursor()
     setPalette(p);
 
     // 强制垂直滚动条精确对齐到逻辑起始行，防止微小行高测量溢出导致的视口虚假向上滚动
-    m_syncingScrollBar = true;
     if (m_isAlternateBuffer) {
         verticalScrollBar()->setVisible(false);
         verticalScrollBar()->setValue(0);
     } else if (m_followTerminalOutput) {
-        verticalScrollBar()->setValue(m_screenBufferStartRow);
+        if (m_screenBufferStartRow == 0) {
+            verticalScrollBar()->setValue(0);
+            QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] syncCursor decision = top-visible";
+        } else {
+            verticalScrollBar()->setValue(verticalScrollBar()->maximum());
+            QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] syncCursor decision = follow-maximum";
+        }
     } else {
         verticalScrollBar()->setValue(preservedScrollValue);
+        QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] syncCursor decision = preserve-history"
+                                         << "preserved =" << preservedScrollValue;
     }
-    m_syncingScrollBar = false;
+
+    // 🌟 全部恢复完成后，关闭同步保护
+    m_syncingScrollBar--;
+    QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] syncCursor end"
+                                     << "scroll =" << verticalScrollBar()->value()
+                                     << "maximum =" << verticalScrollBar()->maximum()
+                                     << "follow =" << m_followTerminalOutput;
+    traceViewportState("syncCursor-end");
 }
 
 void TerminalWidget::checkHeuristicAlternateScreen()
@@ -1208,10 +1403,10 @@ void TerminalWidget::checkHeuristicAlternateScreen()
     }
 
     bool hasChild = (m_pty && hasActiveChildProcess(m_pty->pid()));
-    bool shouldBeInAlt = (m_win32InputModeActive && !m_cursorVisible && hasChild);
+    bool shouldBeInAlt = shouldUseHeuristicAlternateScreen(m_win32InputModeActive, m_cursorVisible, hasChild);
 
     if (shouldBeInAlt && !m_isAlternateBuffer) {
-        qDebug() << "[TRACE] checkHeuristicAlternateScreen: Triggering heuristic ENTER alternate buffer.";
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] checkHeuristicAlternateScreen: Triggering heuristic ENTER alternate buffer.";
         m_isHeuristicAlternateBuffer = true;
         
         m_primaryDoc = document();
@@ -1239,7 +1434,7 @@ void TerminalWidget::checkHeuristicAlternateScreen()
         verticalScrollBar()->setRange(0, 0);
     }
     else if (!shouldBeInAlt && m_isAlternateBuffer && m_isHeuristicAlternateBuffer) {
-        qDebug() << "[TRACE] checkHeuristicAlternateScreen: Triggering heuristic EXIT alternate buffer.";
+        QT_TERMINAL_TRACE_STREAM << "[TRACE] checkHeuristicAlternateScreen: Triggering heuristic EXIT alternate buffer.";
         m_isHeuristicAlternateBuffer = false;
         m_isAlternateBuffer = false;
 
@@ -1258,20 +1453,84 @@ void TerminalWidget::checkHeuristicAlternateScreen()
     }
 }
 
+bool TerminalWidget::shouldUseHeuristicAlternateScreen(bool win32InputModeActive, bool cursorVisible, bool hasChild)
+{
+    Q_UNUSED(win32InputModeActive);
+    Q_UNUSED(cursorVisible);
+    Q_UNUSED(hasChild);
+    return false;
+}
+
 
 void TerminalWidget::mousePressEvent(QMouseEvent *e)
 {
-    QPlainTextEdit::mousePressEvent(e);
+    if (m_mouseTrackingEnabled) {
+        MouseState state;
+        state.trackingEnabled = m_mouseTrackingEnabled;
+        state.trackingMode = m_mouseTrackingMode;
+        state.encoding = m_mouseEncoding;
+
+        QFontMetrics fm(font());
+        int cellW = qMax(1, fm.horizontalAdvance('A'));
+        int cellH = qMax(1, fm.lineSpacing());
+
+        QByteArray data = InputTranslator::translateMouseEvent(e, state, m_cols, m_rows, cellW, cellH);
+        if (!data.isEmpty()) {
+            writeToPty(data);
+        }
+        e->accept();
+    } else {
+        QPlainTextEdit::mousePressEvent(e);
+    }
 }
 
 void TerminalWidget::mouseReleaseEvent(QMouseEvent *e)
 {
-    QPlainTextEdit::mouseReleaseEvent(e);
-    
-    // 🌟 只有在用户没有选中任何文本时（纯单击），才将光标同步回提示符
-    // 如果有选中，则跳过同步以保留高亮选区供用户复制
-    if (!textCursor().hasSelection()) {
-        syncCursor();
+    if (m_mouseTrackingEnabled) {
+        MouseState state;
+        state.trackingEnabled = m_mouseTrackingEnabled;
+        state.trackingMode = m_mouseTrackingMode;
+        state.encoding = m_mouseEncoding;
+
+        QFontMetrics fm(font());
+        int cellW = qMax(1, fm.horizontalAdvance('A'));
+        int cellH = qMax(1, fm.lineSpacing());
+
+        QByteArray data = InputTranslator::translateMouseEvent(e, state, m_cols, m_rows, cellW, cellH);
+        if (!data.isEmpty()) {
+            writeToPty(data);
+        }
+        e->accept();
+    } else {
+        QPlainTextEdit::mouseReleaseEvent(e);
+        
+        // 🌟 只有在用户没有选中任何文本时（纯单击），才将光标同步回提示符
+        // 如果有选中，则跳过同步以保留高亮选区供用户复制
+        if (!textCursor().hasSelection()) {
+            syncCursor();
+        }
+    }
+}
+
+void TerminalWidget::mouseMoveEvent(QMouseEvent *e)
+{
+    if (m_mouseTrackingEnabled) {
+        MouseState state;
+        state.trackingEnabled = m_mouseTrackingEnabled;
+        state.trackingMode = m_mouseTrackingMode;
+        state.encoding = m_mouseEncoding;
+
+        QFontMetrics fm(font());
+        int cellW = qMax(1, fm.horizontalAdvance('A'));
+        int cellH = qMax(1, fm.lineSpacing());
+
+        QByteArray data = InputTranslator::translateMouseEvent(e, state, m_cols, m_rows, cellW, cellH);
+        if (!data.isEmpty()) {
+            writeToPty(data);
+        }
+        e->accept();
+    } else {
+        QPlainTextEdit::mouseMoveEvent(e);
     }
 }
 
@@ -1408,13 +1667,27 @@ int TerminalWidget::columnToCharIndex(const QString &text, int targetCol) const
 
 void TerminalWidget::inputMethodEvent(QInputMethodEvent *e)
 {
-    qDebug() << "[TRACE] inputMethodEvent: commitString =" << e->commitString()
-             << "preeditString =" << e->preeditString();
+    QT_TERMINAL_VERBOSE_TRACE_STREAM << "[TRACE] inputMethodEvent: commitString =" << e->commitString()
+                                     << "preeditString =" << e->preeditString();
 
     if (!e->commitString().isEmpty()) {
+        clearPreedit(); // 提交前必须彻底清空临时预编辑文本，防止网格残留
+
+        m_followTerminalOutput = true;
+        syncCursor();
+
         writeToPty(e->commitString().toUtf8());
+        e->accept();
+    } else if (!e->preeditString().isEmpty()) {
+        // 由终端网格接管预编辑字符串的绘制
+        applyPreedit(e->preeditString());
+        e->accept();
+    } else {
+        // 如果两者均为空，这可能是输入法重置或状态变更
+        // 必须清空预编辑，并交由基类 QPlainTextEdit 处理以同步 Qt 内部 IME 状态，严禁静默 accept 吃掉事件
+        clearPreedit();
+        QPlainTextEdit::inputMethodEvent(e);
     }
-    e->accept();
 }
 
 int TerminalWidget::blockDisplayWidth(const QTextBlock &block) const
@@ -1558,4 +1831,122 @@ int TerminalWidget::blockCharDisplayWidthAt(const QTextBlock &block, int charInd
         }
     }
     return 1;
+}
+
+QVariant TerminalWidget::inputMethodQuery(Qt::InputMethodQuery query) const
+{
+    if (query == Qt::ImCursorRectangle) {
+        // 返回当前逻辑光标在视口中的精确物理位置矩形，以指导输入法候选框定位
+        // 彻底解耦于富文本插入点，完美支持历史浏览、备用屏及宽字符下的等价定位
+        QFontMetrics fm(font());
+        int cellW = qMax(1, fm.horizontalAdvance('A'));
+        int cellH = qMax(1, fm.lineSpacing());
+        
+        int x = (m_cursorCol - 1) * cellW;
+        int y = (m_cursorRow - 1) * cellH;
+        return QRect(x, y, cellW, cellH);
+    }
+    return QPlainTextEdit::inputMethodQuery(query);
+}
+
+void TerminalWidget::applyPreedit(const QString &preeditStr)
+{
+    if (preeditStr.isEmpty()) {
+        clearPreedit();
+        return;
+    }
+
+    // 开启同步保护，防止修改文档引发 valueChanged 误判跟随状态
+    m_syncingScrollBar++;
+
+    if (!m_inPreedit) {
+        m_preeditAnchorRow = m_cursorRow;
+        m_preeditAnchorCol = m_cursorCol;
+        m_inPreedit = true;
+    } else {
+        // 先删除上一次在 anchor 处绘制的预编辑文本
+        QTextDocument *doc = document();
+        int anchorDocRow = m_screenBufferStartRow + m_preeditAnchorRow - 1;
+        if (anchorDocRow >= 0 && anchorDocRow < doc->blockCount()) {
+            QTextBlock block = doc->findBlockByNumber(anchorDocRow);
+            if (block.isValid()) {
+                int charIdx = blockColumnToCharIndex(block, m_preeditAnchorCol);
+                QTextCursor cursor(block);
+                cursor.setPosition(block.position() + charIdx);
+                cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, m_currentPreeditString.length());
+                cursor.removeSelectedText();
+            }
+        }
+    }
+
+    // 插入新预编辑文本并渲染特定的虚线/下划线样式以区分正式文本
+    QTextDocument *doc = document();
+    int anchorDocRow = m_screenBufferStartRow + m_preeditAnchorRow - 1;
+    if (anchorDocRow >= 0 && anchorDocRow < doc->blockCount()) {
+        QTextBlock block = doc->findBlockByNumber(anchorDocRow);
+        if (block.isValid()) {
+            int charIdx = blockColumnToCharIndex(block, m_preeditAnchorCol);
+            QTextCursor cursor(block);
+            cursor.setPosition(block.position() + charIdx);
+
+            QTextCharFormat format;
+            format.setUnderlineStyle(QTextCharFormat::DashUnderline);
+            format.setForeground(QColor(100, 200, 255)); // 采用淡蓝色渲染
+            cursor.insertText(preeditStr, format);
+        }
+    }
+
+    m_currentPreeditString = preeditStr;
+
+    // 计算预编辑内容的物理显示宽度，并将逻辑光标向右偏置定位在拼音串末尾
+    int preeditWidth = stringDisplayWidth(preeditStr);
+    m_cursorRow = m_preeditAnchorRow;
+    m_cursorCol = m_preeditAnchorCol + preeditWidth;
+
+    syncCursor();
+    
+    m_syncingScrollBar--;
+}
+
+void TerminalWidget::clearPreedit()
+{
+    if (m_inPreedit) {
+        m_syncingScrollBar++;
+
+        QTextDocument *doc = document();
+        int anchorDocRow = m_screenBufferStartRow + m_preeditAnchorRow - 1;
+        if (anchorDocRow >= 0 && anchorDocRow < doc->blockCount()) {
+            QTextBlock block = doc->findBlockByNumber(anchorDocRow);
+            if (block.isValid()) {
+                int charIdx = blockColumnToCharIndex(block, m_preeditAnchorCol);
+                QTextCursor cursor(block);
+                cursor.setPosition(block.position() + charIdx);
+                cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, m_currentPreeditString.length());
+                cursor.removeSelectedText();
+            }
+        }
+
+        m_cursorRow = m_preeditAnchorRow;
+        m_cursorCol = m_preeditAnchorCol;
+        m_currentPreeditString.clear();
+        m_inPreedit = false;
+
+        syncCursor();
+
+        m_syncingScrollBar--;
+    }
+}
+
+void TerminalWidget::traceViewportState(const char *context) const
+{
+    QT_TERMINAL_VIEWPORT_TRACE_STREAM << "[VIEWPORT] state"
+                                     << context
+                                     << "follow =" << m_followTerminalOutput
+                                     << "alternate =" << m_isAlternateBuffer
+                                     << "startRow =" << m_screenBufferStartRow
+                                     << "cursor =" << m_cursorRow << m_cursorCol
+                                     << "rows =" << m_rows
+                                     << "blocks =" << document()->blockCount()
+                                     << "scroll =" << verticalScrollBar()->value()
+                                     << "maximum =" << verticalScrollBar()->maximum();
 }
